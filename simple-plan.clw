@@ -292,7 +292,18 @@ we are at the end of the calendar
 point to the timespan containing the |moment| given to the
 |iterator-starting-at|.  We do this with a binary search.
 
+@l
+(defun binary-search (sequence key compare &optional (lb 0) (ub (length sequence)))
+  (loop :while (> (- ub lb) 1)
+     :for m = (floor (+ ub lb) 2)
+     :do
+       (if (funcall compare (aref sequence m) key)
+	   (setf lb m)
+	   (setf ub m)))
+  (when (funcall compare (aref sequence lb) key)
+    lb))
 
+  
   
 
 @*Identifiable Objects.  Identifiable objects are objects that can be

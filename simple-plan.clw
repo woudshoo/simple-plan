@@ -55,6 +55,7 @@ the following a basic API.
 (defgeneric before       (first second))
 (defgeneric after        (first second))
 (defgeneric time-between (first second))
+(defgeneric time-span-between (first second))
 (defgeneric duration     (object))
 (defgeneric infinity-p   (object))
 (defgeneric intersect    (first second))
@@ -242,8 +243,10 @@ therefore gets its own name.
 
 @ And can be compared with the |before| and |after| with a |moment|.
 We consider a time span before a moment if the whole of the time span
-is before the moment, or in other words, if the end momemnt of the
-time span lies before th checked moment.
+is before the moment, or in other words, if the end moment of the
+time span lies before the checked moment.
+
+TODO: Check again.  time-spans are half open intervals, so this is wrong.
 
 @l
 (defmethod before ((time-span time-span) (moment moment))
@@ -255,6 +258,13 @@ time span lies before th checked moment.
 (defmethod before ((moment moment) (time-span time-span))
   (before moment (begin time-span)))
 
+@ Also a |time-span| is before another |time-span| if the whole of the first time span is before
+the second time span.  That is, there is no intersection and the first time span is before the beginning of the second time-span
+
+@l
+(defmethod before ((first time-span) (second time-span))
+  (before first (begin second)))
+
 @ The after methods work out of the box with the default implementation.  The call |(after moment time-span)|
 is translated to |(before time-span moment)|, which in turn is |(before (end time-span) moment)| and that is |(after moment (end time-span))|.
 
@@ -262,7 +272,8 @@ This is what we want, it returns true iff the moment is after the end of time-sp
 
 Similarly the call |(after time-span moment)| is only true if the moment is before the beginning of of the time span.
 
-@ The intersection method of a |time-span| with a |moment| returns the
+@3 Intersections.
+The intersection method of a |time-span| with a |moment| returns the
 moment if the moment falls in the |time-span| and |nil| otherwise.
 
 @l
@@ -292,24 +303,59 @@ moment if the moment falls in the |time-span| and |nil| otherwise.
 	      (end   (first-of `(,(end first) ,(end second)))))
 	  (when (before begin end)
 	    (make-instance 'time-span :begin begin :end end))))))
-	 
-@ Sometimes it is important to know if a (sorted) collection of time-spans
+
+@ The timespan between two objects is a time span that starts at the end
+of the first argument and ends at the begin of the second argument.
+
+If there is no gap between the first and second argument, it will return |nil|.
+It will also return |nil| if the second argument is before the first.
+
+Basically it will return |nil| if |(between first second)| is not
+greater than 0.   And it will return a time span of |(between first second)| if it is.
+
+@l
+(defmethod time-span-between ((first t) (second t))
+  (when (before first second)
+    (make-instance 'time-span :begin (end first) :end (begin second))))
+
+@3* Checks on Timespans. 
+Sometimes it is important to know if a vector of time-spans
 are continuous covering an stretch of time.
 This the following function |time-spans-have-no-gaps-p| will do, it will return
 a generarlized true value if the range is continuous, it will return |nil| otherwise.
 
 The argument is assumed to be sorted, so only consecutive values need to be checked.
 
+Note that the test to check for the zero duration is |eql|.  This
+becuase the |time-between| call can return |nil|
+
 @l
 (defun time-spans-have-no-gaps-p (sorted-list-of-time-spans)
   (loop
      :for (a b) :on sorted-list-of-time-spans
      :while b
-     :unless (= 0 (time-between (end a) (begin b)))
+     :unless (eql 0 (time-between (end a) (begin b)))
      :do (return-from time-spans-have-no-gaps-p nil))
   t)
 
-  
+@ Similarly, there is a check if the time spans are disjunct.
+
+@l
+(defun time-spans-have-no-overlap-p (sorted-list)
+  (loop
+     :for (a b) :on sorted-list
+     :while b
+     :when (intersect a b)
+     :do (return-from time-spans-have-no-overlap-p nil))
+  t)
+
+@ And also to check if some time spans have zero width.
+
+@l 
+(defun time-spans-have-no-zero-width-p (list)
+  (find 0 list :key #'duration))
+
+
 @2* Time and Values.  Often we want to associate a single value with a
 moment or time span.   There are two obvious strategies for implementing this:
 \unorderedlist
@@ -362,6 +408,73 @@ quite verbose.  So we introduce the following shorthand
 (create-wrapped-methods-2 time-between time-spec-with-value time-spec)
 (create-wrapped-methods-1 duration time-spec-with-value time-spec)
 (create-wrapped-methods-1 infinity-p time-spec-with-value time-spec)
+
+@3* Adding Misisng Data.  Typically data is only specified for
+time-spans where the value is not zero or some other default value.
+For the |basic-calendar| and some other constructs, we need to fill in
+the missing sections.  The generic way of doing this is by using
+calendars.  (See section on Calendars).
+
+However this creates a bit of chicken and egg problem, because
+calendars represent all of time, with no gap.
+
+So we need a basic function to augment a list of
+|time-spec-with-value| objects with the missing time intervals.
+
+@l
+(defun add-missing-time-specs-with-value (sorted-list-of-time-specs default-value)
+  @<Handle empty list argument@>
+  (let ((result (list)))
+    @<Handle first time-spec@>
+    (loop
+       :for (a b) :on sorted-list-of-time-specs
+       :while a
+       :for time-span-between = (time-span-between a b)
+       :do
+	 (if b
+	     (progn
+	       (when time-span-between
+		 (push (make-instance 'time-spec-with-value
+				      :time-spec time-span-between :value default-value)
+		       result))
+	       (push b result))
+	   @<Handle last time-spec@>))
+    (nreverse result)))
+
+@ Handling empty list argument is easy, just return a list containing one element covering all of time.
+
+@<Handle empty list argument@>=
+(unless sorted-list-of-time-specs
+  (return-from add-missing-time-specs-with-value
+    (list
+     (make-instance 'time-spec-with-value
+		    :time-spec +time-span-all+ :value default-value))))
+
+@ Handling the first of the input list is slightly more code.  We need
+to check that the first added time-span did not start at
+|+moment-before-time+| and add a new |time-spec-with-value| covering the
+initial stretch of time
+
+@<Handle first time-spec@>=		;
+(unless (eql +moment-before-time+ (begin (first sorted-list-of-time-specs)))
+  (push (make-instance 'time-spec-with-value
+		       :time-spec (make-instance 'time-span
+						 :begin +moment-before-time+
+						 :end (begin (first sorted-list-of-time-specs)))
+		       :value default-value)
+	result))
+
+
+@ Handling the last of the input list is basically the reverse of handling the first |time-spec|.
+
+@<Handle last time-spec@>=
+(unless (eql +moment-after-time+ (end a))
+  (push (make-instance 'time-spec-with-value
+		       :time-spec (make-instance 'time-span
+						 :begin (end a)
+						 :end +moment-after-time+)
+		       :value default-value)
+	result))
 
 
 @*Calendars.  Calendars are central to the simple-plan system.
@@ -561,13 +674,16 @@ point to an error in the calling code.  Until we discover a good use case for
 zero duration intervals (including moments) we will raise an error.
 
 @l
-(defun basic-calendar (list-of-time-specs-with-value)
+(defun basic-calendar (list-of-time-specs-with-value &optional (default-value 0))
   (let ((sorted-list (sort list-of-time-specs-with-value #'before)))
-
-    (check-timespans-for-zero-width sorted-list)
-    (check-timespans-for-gaps sorted-list)
-    (make-instance 'basic-calendar
-		   :time-spans-with-value (coerce sorted-list 'vector))))
+    (and
+     (time-spans-have-no-zero-width-p sorted-list)
+     (time-spans-have-no-overlap-p sorted-list)
+     (make-instance 'basic-calendar
+		    :time-spans-with-value
+		    (coerce 
+		     (add-missing-time-specs-with-value sorted-list default-value)
+		     'vector)))))
 
 
 @*Identifiable Objects.  Identifiable objects are objects that can be
